@@ -39,6 +39,7 @@ jobs:
           gcloud builds submit app1-webscout \
             --tag $REGION-docker.pkg.dev/$PROJECT_ID/$SERVICE_APP1/app1 \
             --service-account=projects/$PROJECT_ID/serviceAccounts/github-actions-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+            --cloud-logging-only \
             --quiet
             
       - name: Deploy App1 to Cloud Run
@@ -74,6 +75,7 @@ jobs:
           gcloud builds submit app2-documind \
             --tag $REGION-docker.pkg.dev/$PROJECT_ID/$SERVICE_APP2/app2 \
             --service-account=projects/$PROJECT_ID/serviceAccounts/github-actions-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+            --cloud-logging-only \
             --quiet
             
       - name: Deploy App2 to Cloud Run
