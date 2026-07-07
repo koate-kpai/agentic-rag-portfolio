@@ -1,11 +1,63 @@
-# rag_pipeline.py
+# rag_pipeline.py — Agentic RAG pipeline for app2-documind
+#
+# ARCHITECTURAL DECISION: Function calling for domain classification
+# -------------------------------------------------------------------
+# Prompt-based classification (asking GPT to "return one of: X, Y, Z")
+# is inherently fragile because the model is a text generator, not an
+# enum selector.  Even with temperature=0, the same prompt can produce:
+#   "finance"        — correct
+#   "Finance"        — case mismatch
+#   "finance."       — trailing punctuation
+#   "the domain is finance" — extra text
+#   "I think it's finance" — conversational filler
+#
+# Each of these requires a brittle parsing heuristic (.strip().lower(),
+# .split()[-1], regex), and each heuristic introduces a new failure mode.
+#
+# OpenAI function calling (tools parameter) gives us a machine-readable
+# structured output contract.  The model MUST return a valid JSON object
+# matching the schema, or the API itself rejects the response.  This:
+#   1. Eliminates parsing entirely — we read result["domain"] directly.
+#   2. Guarantees one of the three enum values (the API enforces enums).
+#   3. Fails fast with a clean API error if the model cannot comply,
+#      rather than silently returning garbage text.
+#
+# This is the standard pattern for classification in production LLM
+# systems across the industry (OpenAI Cookbook, LangChain, LlamaIndex).
 
 from typing import List, Dict, Tuple
+import uuid
 from openai import AsyncOpenAI
 from .vectorstore import DomainVectorStore
 from .logger import setup_logger
 
 logger = setup_logger("documind.rag")
+
+# The known domain keys.  Must match the keys in DomainVectorStore.docs_by_domain.
+VALID_DOMAINS = {"finance", "healthcare", "legal"}
+
+# Function definition for constrained domain classification.
+# The OpenAI API enforces the enum constraint server-side, guaranteeing
+# a parseable response regardless of model behaviour.
+CLASSIFY_DOMAIN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "classify_domain",
+        "description": "Classify a user's query into one of the supported knowledge domains.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "enum": ["finance", "healthcare", "legal"],
+                    "description": "The domain that best matches the user's query.",
+                }
+            },
+            "required": ["domain"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class DocuMindRAG:
@@ -15,14 +67,57 @@ class DocuMindRAG:
         self.max_retries = 2
 
     async def _classify_domain(self, query: str) -> str:
-        prompt = f"Classify the query into one domain: finance, healthcare, legal. Query: {query}\nDomain:"
+        """
+        Classify a query into one of the supported domains using function calling.
+
+        Returns one of: "finance", "healthcare", "legal", or "unknown" if the
+        model cannot determine a domain (defense-in-depth fallback).
+        """
         resp = await self.client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a domain classifier. Your ONLY job is to call the "
+                        "classify_domain function with the appropriate domain. "
+                        "Do not respond with any text — only call the function."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            # Function calling with tool_choice="required" forces the model to
+            # call the function on every turn (rather than optionally generating
+            # a text response).  This is the strictest constraint available.
+            tools=[CLASSIFY_DOMAIN_TOOL],
+            tool_choice={"type": "function", "function": {"name": "classify_domain"}},
+            max_tokens=50,
             temperature=0.0,
         )
-        return resp.choices[0].message.content.strip().lower()
+
+        msg = resp.choices[0].message
+
+        # Defensive: verify the model actually made a tool call.
+        # Under normal operation with tool_choice="required" this always
+        # succeeds, but we guard against edge cases (API changes, model
+        # regressions) with a fallback to "unknown".
+        if msg.tool_calls:
+            try:
+                import json
+
+                args = json.loads(msg.tool_calls[0].function.arguments)
+                domain = args.get("domain", "unknown").lower()
+                return domain if domain in VALID_DOMAINS else "unknown"
+            except (json.JSONDecodeError, KeyError, IndexError) as exc:
+                logger.warning(f"Failed to parse domain classification: {exc}")
+                return "unknown"
+
+        logger.warning(
+            "Model returned no tool call during domain classification. "
+            "This should not happen with tool_choice='required'. "
+            f"Raw response: {msg.content}"
+        )
+        return "unknown"
 
     async def _evaluate_retrieval(
         self, query: str, docs: List[Tuple[Dict, float]]
