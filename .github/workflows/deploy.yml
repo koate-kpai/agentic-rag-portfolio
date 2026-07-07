@@ -16,7 +16,60 @@ env:
   SERVICE_APP2: documind
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Quality gate: lint + test before deploying either service.
+  # Both deploy jobs declare "needs: lint-and-test" so a failed gate blocks
+  # deployment to production.
+  #
+  # ARCHITECTURAL DECISION: Blocking quality gate
+  # ----------------------------------------------
+  # Deploying without quality checks is the single highest-risk pattern in
+  # CI/CD.  Adding a blocking gate means:
+  #   - Ruff catches syntax errors, undefined names, and import issues in
+  #     < 1 second.
+  #   - Pytest catches regressions in the RAG pipeline, vector store, and
+  #     agent logic before they reach Cloud Run.
+  #   - Failures are surfaced in the GitHub Actions UI with clear stack
+  #     traces, not as 500 errors in production.
+  #
+  # The gate is a shared job (not duplicated per app) because the linting
+  # rules are the same and the test infrastructure (pip install) is shared.
+  # The total cost is ~30 seconds of CI time — negligible insurance against
+  # a production incident.
+  # -------------------------------------------------------------------------
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy
+          pip install -r app1-webscout/requirements.txt
+          pip install -r app2-documind/requirements.txt
+
+      - name: Lint with Ruff
+        run: ruff check app1-webscout/src app2-documind/src
+
+      - name: Type check with mypy
+        run: mypy app1-webscout/src app2-documind/src
+
+      # Tests run per-app because both apps share the "src" package name
+      # and only one can be in sys.path at a time.
+      - name: Test app1-webscout
+        run: pytest app1-webscout/tests/ --tb=short -q
+
+      - name: Test app2-documind
+        run: pytest app2-documind/tests/ --tb=short -q
+
   deploy-app1:
+    needs: lint-and-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +106,7 @@ jobs:
             --quiet
 
   deploy-app2:
+    needs: lint-and-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

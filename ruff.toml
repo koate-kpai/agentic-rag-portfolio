@@ -1,0 +1,39 @@
+# ruff.toml — Ruff linter configuration
+#
+# ARCHITECTURAL DECISION: Ruff over Flake8 / pylint
+# --------------------------------------------------
+# Ruff is a Rust-based linter that runs 100-1000x faster than Flake8 while
+# implementing the same rule sets (pycodestyle, pyflakes, isort, etc.).
+# In CI, sub-second linting means there is no excuse to skip it — the quality
+# gate adds negligible time to the deployment pipeline.
+#
+# We use a conservative rule set that catches real bugs without overwhelming
+# new contributors with stylistic nitpicks.  The focus is on:
+#   - Syntax errors and undefined names (F)
+#   - Import sorting and unused imports (I)
+#   - Unused variables and function arguments (ARG)
+
+target-version = "py311"
+line-length = 100
+
+# Select rule categories:
+#   F  — pyflakes (errors)
+#   I  — isort (import sorting)
+#   N  — pep8-naming (naming conventions)
+#   W  — pycodestyle (warnings)
+#   E  — pycodestyle (errors)
+#   ARG — flake8-unused-arguments
+select = ["F", "I", "N", "W", "E", "ARG"]
+
+# Allow longer lines in comments and docstrings (they often contain URLs or
+# ASCII diagrams that cannot be wrapped naturally).
+ignore = ["E501"]
+
+# Exclude auto-generated and vendored directories.
+exclude = [
+    ".git",
+    ".github",
+    "venv",
+    "tests",
+    "__pycache__",
+]
