@@ -166,14 +166,65 @@ class DocuMindRAG:
         return resp.choices[0].message.content.strip()
 
     async def process_query(self, query: str) -> Dict:
+        """
+        Full RAG pipeline: classify → retrieve → evaluate → (reformulate) → answer.
+
+        ARCHITECTURAL DECISION: Fail-fast on unknown domain
+        ----------------------------------------------------
+        When the classifier returns "unknown", we return early with a clear
+        message rather than attempting retrieval (which would return empty
+        results and produce a confusing "No relevant documents found" response).
+        This is the fail-fast pattern: surface the classification ambiguity
+        immediately rather than letting it compound into a meaningless answer.
+
+        ARCHITECTURAL DECISION: Self-correction loop cap
+        -------------------------------------------------
+        Self-correction loops are unbounded by nature — each iteration burns
+        an LLM API call for evaluation plus potentially another for answer
+        generation.  A hard cap of 2 retries (3 total attempts) is a pragmatic
+        tradeoff between:
+          - Cost: each extra iteration costs ~$0.0003 (GPT-4o-mini).
+          - Latency: each iteration adds ~500-1500 ms.
+          - Diminishing returns: if the first reformulation doesn't help, a
+            second one rarely does (the corpus is static and small).
+
+        The identity guard below prevents an infinite loop if the LLM returns
+        the same reformulated query it was given (e.g., the model says "no"
+        but cannot suggest a better query).
+        """
+        # Generate a thread ID so all log entries for this request can be
+        # correlated in Cloud Logging without relying on request-level
+        # middleware (which doesn't exist yet in this lightweight setup).
+        thread_id = uuid.uuid4().hex[:8]
         thought_process = []
 
-        # 1. Domain routing
+        # 1. Domain routing — classify the user query into a knowledge domain
         domain = await self._classify_domain(query)
         thought_process.append(f"Domain classified as: {domain}")
+        logger.info(f"[{thread_id}] Domain classification: {domain}")
 
-        # 2. Initial retrieval
+        # Early exit: if the domain is unknown, there's nothing to retrieve.
+        # Rather than returning "No relevant documents found" (which implies
+        # retrieval failed), we tell the user classification itself failed.
+        if domain == "unknown" or domain not in VALID_DOMAINS:
+            logger.info(f"[{thread_id}] Unknown domain, returning early")
+            return {
+                "answer": (
+                    "I couldn't classify your query into a supported knowledge domain "
+                    "(finance, healthcare, or legal). Please rephrase your question to "
+                    "specify which domain it relates to."
+                ),
+                "domain": "unknown",
+                "thought_process": thought_process,
+                "retrieved_docs": [],
+                "citations": [],
+            }
+
+        # 2. Initial retrieval — query the TF-IDF vector store for the top-2 docs
         docs = self.vector_store.retrieve(query, domain)
+        logger.info(
+            f"[{thread_id}] Initial retrieval for '{domain}': {len(docs)} docs"
+        )
         if not docs:
             return {
                 "answer": "No relevant documents found in the specified domain.",
@@ -183,7 +234,7 @@ class DocuMindRAG:
                 "citations": [],
             }
 
-        # 3. Self‑correction loop
+        # 3. Self-correction loop — evaluate sufficiency, reformulate if needed
         attempt = 0
         current_query = query
         while attempt <= self.max_retries:
@@ -192,12 +243,34 @@ class DocuMindRAG:
                 current_query, docs
             )
             thought_process.append(
-                f"Attempt {attempt}: Evaluator says {'sufficient' if sufficient else 'insufficient'}"
+                f"Attempt {attempt}: Evaluator says "
+                f"{'sufficient' if sufficient else 'insufficient'}"
             )
+            logger.info(
+                f"[{thread_id}] Evaluation attempt {attempt}: "
+                f"{'sufficient' if sufficient else 'insufficient'}"
+            )
+
             if sufficient:
                 break
+
+            # Identity guard: if the LLM returned the same query it received,
+            # further reformulation attempts will also be no-ops.  Break early
+            # to avoid burning API calls on a dead-end loop.
+            if reformulated and reformulated == current_query:
+                logger.info(
+                    f"[{thread_id}] Reformulation is identical to current query, "
+                    "breaking loop"
+                )
+                thought_process.append(
+                    "Reformulation unchanged from current query, stopping"
+                )
+                break
+
             if reformulated and attempt <= self.max_retries:
-                thought_process.append(f"Reformulating query to: {reformulated}")
+                thought_process.append(
+                    f"Reformulating query to: {reformulated}"
+                )
                 new_docs = self.vector_store.retrieve(reformulated, domain)
                 if new_docs:
                     docs = new_docs
@@ -205,10 +278,12 @@ class DocuMindRAG:
             else:
                 break
 
-        # 4. Final answer
+        # 4. Final answer generation
+        logger.info(
+            f"[{thread_id}] Generating final answer with {len(docs)} docs"
+        )
         answer = await self._generate_answer(query, domain, docs)
 
-        # Build retrieved docs list for transparency
         retrieved_docs_list = [
             {
                 "doc_id": d[0]["id"],
