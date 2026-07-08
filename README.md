@@ -81,7 +81,7 @@ A portfolio of two agentic AI microservices built with **FastAPI** and **OpenAI 
 ## Repository Structure
 
 ```
-agentic-rag-portfolio/
+quantitative-finance-modelvIG/
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml           CI/CD: lint → test → Cloud Build → Cloud Run
@@ -107,8 +107,8 @@ agentic-rag-portfolio/
 
 ```bash
 # Clone
-git clone https://github.com/koate-kpai/agentic-rag-portfolio
-cd agentic-rag-portfolio
+git clone https://github.com/koate-kpai/quantitative-finance-modelvIG
+cd quantitative-finance-modelvIG
 
 # Set your API key
 echo "OPENAI_API_KEY=sk-your-key-here" > .env
