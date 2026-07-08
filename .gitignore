@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Personal documents (not for public repo)
+LINKEDIN_PROFILE.md
+
 # Virtual Environments
 venv/
 .venv/
